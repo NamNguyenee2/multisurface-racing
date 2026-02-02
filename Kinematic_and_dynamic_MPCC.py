@@ -3,7 +3,7 @@ import yaml
 import gym
 from argparse import Namespace
 from regulators.pure_pursuit import *
-from regulators.path_follow_mpc import STMPCPlanner_MPC
+from regulators.path_follow_mpcc import STMPCPlanner
 from regulators.path_follow_mpcc import *
 from models.extended_kinematic_mpcc import ExtendedKinematicModel
 from models.dynamic_mpcc import DynamicBicycleModel
@@ -64,24 +64,24 @@ class MPCConfigEXT:
 class MPCConfigDYN:
     NXK: int = 8  # length of kinematic state vector: z = [x, y, vx, yaw angle, vy, yaw rate, steering angle]
     NU: int = 3  # length of input vector: u = = [acceleration, steering speed]
-    TK: int = 5  # finite time horizon length kinematic
+    TK: int = 20  # finite time horizon length kinematic
 
     Rk: list = field(
-        default_factory=lambda: np.diag([0.000000001, 10.0, 1.0])
+        default_factory=lambda: np.diag([0.000000001, 1.0, 1.0])
     )  # input cost matrix, penalty for inputs - [accel, steering_speed]
     Rdk: list = field(
-        default_factory=lambda: np.diag([0.000000001, 10.0, 1.0])
+        default_factory=lambda: np.diag([0.000000001, 1.0, 1.0])
     )  # input difference cost matrix, penalty for change of inputs - [accel, steering_speed]
     Qk: list = field(
-        default_factory=lambda: np.diag([13.5, 13.5, 10.5, 15.0, 0.0, 0.0, 0.0, 0.0])
+        default_factory=lambda: np.diag([20.5, 20.5, 0., 0.0, 0.0, 0.0, 0.0, 0.0])
         # [13.5, 13.5, 5.5, 13.0, 0.0, 0.0, 0.0]
     )  # state error cost matrix, for the next (T) prediction time steps
     Qfk: list = field(
-        default_factory=lambda: np.diag([13.5, 13.5, 10.5, 15.0, 0.0, 0.0, 0.0, 0.0])
+        default_factory=lambda: np.diag([20.5, 20.5, 0., 0.0, 0.0, 0.0, 0.0, 0.0])
         # [13.5, 13.5, 5.5, 13.0, 0.0, 0.0, 0.0]
     )  # final state error matrix, penalty  for the final state constraints
     N_IND_SEARCH: int = 20  # Search index number
-    DTK: float = 0.1  # time step [s] kinematic
+    DTK: float = 0.05  # time step [s] kinematic
     dlk: float = 3.0  # dist step [m] kinematic
     LENGTH: float = 4.298  # Length of the vehicle [m]
     WIDTH: float = 1.674  # Width of the vehicle [m]
@@ -248,7 +248,7 @@ def main():  # after launching this you can run visualization.py to see the resu
     """
 
     # Choose program parameters
-    model_to_use = 'ext_kinematic'  # options: ext_kinematic, pure_pursuit, dynamic
+    model_to_use = 'dynamic'  # options: ext_kinematic, pure_pursuit, dynamic
     map_name = 'rounded_rectangle'  # Nuerburgring, SaoPaulo, rounded_rectangle, l_shape, BrandsHatch, DualLaneChange, Austin, Budapest, Catalunya
     # Hockenheim, IMS, Melbourne, MexicoCity, Montreal, Monza, MoscowRaceway, Oschersleben, Sakhir, Sepang, Silverstone, Sochi, Spa, Spielberg
     # YasMarina
@@ -317,7 +317,7 @@ def main():  # after launching this you can run visualization.py to see the resu
     planner_pp = PurePursuitPlanner(conf, 0.805975 + 1.50876)  # 0.805975 + 1.50876
     planner_pp.waypoints = waypoints
 
-    planner_ekin_mpc = STMPCPlanner_MPC(model=ExtendedKinematicModel(config=MPCConfigEXT()), waypoints=waypoints,
+    planner_ekin_mpc = STMPCPlanner(model=ExtendedKinematicModel(config=MPCConfigEXT()), waypoints=waypoints,
                                     config=MPCConfigEXT())
 
     planner_dyn_mpc = STMPCPlanner(model=DynamicBicycleModel(config=dyn_config), waypoints=waypoints,
@@ -413,6 +413,7 @@ def main():  # after launching this you can run visualization.py to see the resu
             # draw predicted states and reference trajectory
             draw.reference_traj_show = np.array([mpc_ref_path_x, mpc_ref_path_y]).T
             draw.predicted_traj_show = np.array([mpc_pred_x, mpc_pred_y]).T
+            print("use ext_kinematic")
         elif model_to_use == "dynamic":
             if vehicle_state[2] < 0.1:
                 u, mpc_ref_path_x, mpc_ref_path_y, mpc_pred_x, mpc_pred_y, mpc_ox, mpc_oy = planner_dyn_mpc.plan(

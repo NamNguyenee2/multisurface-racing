@@ -509,8 +509,6 @@ class STMPCPlanner:
         # Optimization goal: minimize the objective function
         self.MPC_prob = cvxpy.Problem(cvxpy.Minimize(objective), constraints)
 
-    
-
     def mpc_prob_solve(self, ref_traj, path_predict, x0, input_predict):
 
         self.x0k.value = x0
@@ -567,7 +565,7 @@ class STMPCPlanner:
             input_prediction = np.zeros((self.config.NU, self.config.TK))  # self.input_o
             # input_prediction = self.input_o  # self.input_o
         else:
-            state_prediction, input_prediction = self.model.predict_motion(x0, ref_control_input, self.config.DTK)
+            state_prediction, input_prediction = self.model.predict_motion(x0, ref_control_input, self.config.DTK) #Euler method
 
         # Run the MPC optimization: Create and solve the optimization problem
         mpc_input_output, mpc_states_output = self.mpc_prob_solve(ref_path, state_prediction, x0, input_prediction)

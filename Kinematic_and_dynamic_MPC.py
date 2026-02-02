@@ -58,7 +58,7 @@ class MPCConfigEXT:
 class MPCConfigDYN:
     NXK: int = 7  # length of kinematic state vector: z = [x, y, vx, yaw angle, vy, yaw rate, steering angle]
     NU: int = 2  # length of input vector: u = = [acceleration, steering speed]
-    TK: int = 30  # finite time horizon length kinematic
+    TK: int = 10  # finite time horizon length kinematic
 
     Rk: list = field(
         default_factory=lambda: np.diag([0.00000001, 10.0])
@@ -75,7 +75,7 @@ class MPCConfigDYN:
         # [13.5, 13.5, 5.5, 13.0, 0.0, 0.0, 0.0]
     )  # final state error matrix, penalty  for the final state constraints
     N_IND_SEARCH: int = 20  # Search index number
-    DTK: float = 0.1  # time step [s] kinematic
+    DTK: float = 0.02  # time step [s] kinematic
     dlk: float = 3.0  # dist step [m] kinematic
     LENGTH: float = 4.298  # Length of the vehicle [m]
     WIDTH: float = 1.674  # Width of the vehicle [m]
@@ -143,7 +143,7 @@ def main():  # after launching this you can run visualization.py to see the resu
     """
 
     # Choose program parameters
-    model_to_use = 'ext_kinematic'  # options: ext_kinematic, pure_pursuit, dynamic
+    model_to_use = 'dynamic'  # options: ext_kinematic, pure_pursuit, dynamic
     map_name = 'rounded_rectangle'  # Nuerburgring, SaoPaulo, rounded_rectangle, l_shape, BrandsHatch, DualLaneChange, Austin, Budapest, Catalunya
     # Hockenheim, IMS, Melbourne, MexicoCity, Montreal, Monza, MoscowRaceway, Oschersleben, Sakhir, Sepang, Silverstone, Sochi, Spa, Spielberg
     # YasMarina
