@@ -1,24 +1,3 @@
-# MIT License
-
-# Copyright (c) Tomas Nagy, Ahmad Amine, Hongrui Zheng, Johannes Betz
-
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the "Software"), to deal
-# in the Software without restriction, including without limitation the rights
-# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions:
-
-# The above copyright notice and this permission notice shall be included in all
-# copies or substantial portions of the Software.
-
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-# SOFTWARE.
 
 """
 Dynamic Single Track MPC waypoint tracker
@@ -34,7 +13,8 @@ from scipy.linalg import block_diag
 from scipy.sparse import block_diag, csc_matrix, diags
 from numba import njit
 import copy
-
+from scipy.interpolate import CubicSpline
+from scipy.optimize import minimize_scalar
 @njit(cache=True)
 def nearest_point(point, trajectory):
     """
@@ -66,7 +46,62 @@ def nearest_point(point, trajectory):
     dist_from_segment_start = np.linalg.norm(diffs[min_dist_segment] * t[min_dist_segment])
     return projections[min_dist_segment], dist_from_segment_start, dists[min_dist_segment], t[
         min_dist_segment], min_dist_segment
+class TrackRef_getPhi:
+    def __init__(self, waypoints):
+        """
+        Step 1: Create continuous track parameterization.
+        waypoints: np.array shape (N, M), columns [x, y, ...]
+        """
+        # Extract X and Y coordinates
+        self.x = waypoints[:, 0]
+        self.y = waypoints[:, 1]
+        
+        # --- FIX: FORCE CLOSE THE LOOP ---
+        # Check if the last point is far from the first point
+        dist_start_end = np.sqrt((self.x[0] - self.x[-1])**2 + (self.y[0] - self.y[-1])**2)
+        
+        if dist_start_end > 0.001: # If gap is larger than 1mm
+            print(f"Closing the track loop... (Gap was {dist_start_end:.3f}m)")
+            # Append the starting point to the end
+            self.x = np.append(self.x, self.x[0])
+            self.y = np.append(self.y, self.y[0])
+        else:
+            # Even if they are close, enforce exact equality for scipy
+            self.x[-1] = self.x[0]
+            self.y[-1] = self.y[0]
 
+        # 1. Calculate distance between each consecutive point
+        dx = np.diff(self.x)
+        dy = np.diff(self.y)
+        dists = np.sqrt(dx**2 + dy**2)
+        
+        # 2. Cumulative sum to get theta (arc length) for each point
+        # [0, d1, d1+d2, ..., Length]
+        self.theta_arr = np.concatenate(([0], np.cumsum(dists)))
+        self.track_length = self.theta_arr[-1]
+        
+        # 3. Create Splines: X(theta) and Y(theta)
+        # bc_type='periodic' ensures the finish line connects smoothly to start
+        self.spline_x = CubicSpline(self.theta_arr, self.x, bc_type='periodic')
+        self.spline_y = CubicSpline(self.theta_arr, self.y, bc_type='periodic')
+
+    def get_position(self, theta):
+        """Returns x, y at given theta"""
+        # Modulo operator % handles wrapping around the track (lap 2, lap 3...)
+        theta_wrapped = theta % self.track_length
+        return float(self.spline_x(theta_wrapped)), float(self.spline_y(theta_wrapped))
+    
+    def get_phi(self, theta):
+        """Returns the reference heading (phi) at given theta"""
+        theta_wrapped = theta % self.track_length
+        
+        # Get 1st derivative (speed of change of x and y)
+        dx_d = self.spline_x(theta_wrapped, 1)
+        dy_d = self.spline_y(theta_wrapped, 1)
+        
+        # Calculate angle
+        phi_ref = np.arctan2(dy_d, dx_d)
+        return float(phi_ref)
 
 class STMPCPlanner:
     """
@@ -88,9 +123,11 @@ class STMPCPlanner:
             config,
             waypoints=None,
             track=None,
+            phi=None
     ):
         self.waypoints = waypoints
         self.waypoints_distances = np.linalg.norm(self.waypoints[1:, (1, 2)] - self.waypoints[:-1, (1, 2)], axis=1)
+        self.TrackRef_getPhi = TrackRef_getPhi(self.waypoints)
         self.model = model
         self.config = config
         self.track = track

@@ -4,7 +4,7 @@ import gym
 from argparse import Namespace
 from regulators.pure_pursuit import *
 from regulators.path_follow_mpcc import STMPCPlanner
-from regulators.path_follow_mpcc import *
+from regulators.path_follow_mpcc_Claude import *
 from models.extended_kinematic_mpcc import ExtendedKinematicModel
 from models.dynamic_mpcc import DynamicBicycleModel
 from helpers.closest_point import *
@@ -17,6 +17,7 @@ from matplotlib.animation import FuncAnimation
 from scipy.interpolate import CubicSpline
 from scipy.optimize import minimize_scalar
 
+'''
 @dataclass
 class MPCConfigEXT:
     NXK: int = 8  # length of kinematic state vector: z = [x, y, vx, yaw angle, vy, yaw rate, steering angle]
@@ -58,13 +59,13 @@ class MPCConfigEXT:
     MAX_DECEL: float = -45.0  # maximum acceleration [m/ss]
 
     MASS: float = 1225.887  # Vehicle mass
-
+'''
 
 @dataclass
 class MPCConfigDYN:
     NXK: int = 8  # length of kinematic state vector: z = [x, y, vx, yaw angle, vy, yaw rate, steering angle]
     NU: int = 3  # length of input vector: u = = [acceleration, steering speed]
-    TK: int = 20  # finite time horizon length kinematic
+    TK: int = 10  # finite time horizon length kinematic
 
     Rk: list = field(
         default_factory=lambda: np.diag([0.000000001, 1.0, 1.0])
@@ -80,6 +81,9 @@ class MPCConfigDYN:
         default_factory=lambda: np.diag([20.5, 20.5, 0., 0.0, 0.0, 0.0, 0.0, 0.0])
         # [13.5, 13.5, 5.5, 13.0, 0.0, 0.0, 0.0]
     )  # final state error matrix, penalty  for the final state constraints
+    q_contour: float = 30.0
+    q_lag: float = 100.0
+    q_theta: float = -10000.0
     N_IND_SEARCH: int = 20  # Search index number
     DTK: float = 0.05  # time step [s] kinematic
     dlk: float = 3.0  # dist step [m] kinematic
@@ -184,25 +188,7 @@ class TrackRef:
         # bc_type='periodic' ensures the finish line connects smoothly to start
         self.spline_x = CubicSpline(self.theta_arr, self.x, bc_type='periodic')
         self.spline_y = CubicSpline(self.theta_arr, self.y, bc_type='periodic')
-
-    def get_position(self, theta):
-        """Returns x, y at given theta"""
-        # Modulo operator % handles wrapping around the track (lap 2, lap 3...)
-        theta_wrapped = theta % self.track_length
-        return float(self.spline_x(theta_wrapped)), float(self.spline_y(theta_wrapped))
-    
-    def get_phi(self, theta):
-        """Returns the reference heading (phi) at given theta"""
-        theta_wrapped = theta % self.track_length
         
-        # Get 1st derivative (speed of change of x and y)
-        dx_d = self.spline_x(theta_wrapped, 1)
-        dy_d = self.spline_y(theta_wrapped, 1)
-        
-        # Calculate angle
-        phi_ref = np.arctan2(dy_d, dx_d)
-        return float(phi_ref)
-
     def get_current_theta(self, vehicle_state):
         """
         Calculates the exact theta (arc length) closest to the vehicle.
@@ -229,17 +215,12 @@ class TrackRef:
             y_tr = self.spline_y(theta_wrapped)
             # print(self.track_length)
             return (x_car - x_tr)**2 + (y_car - y_tr)**2
-
-        # Optimization bounds: +/- 2 meters around the guess
         # We allow bounds to go negative or > length because cost_fn handles wrapping
         window = 2.0 
         bnds = (theta_guess - window, theta_guess + window)
-        
         res = minimize_scalar(cost_fn, bounds=bnds, method='bounded')
-        
         # Final result wrapped to [0, track_length]
         theta_k = res.x % self.track_length
-        
         return theta_k
 
 def main():  # after launching this you can run visualization.py to see the results
@@ -263,7 +244,7 @@ def main():  # after launching this you can run visualization.py to see the resu
     number_of_laps = 50
     start_point = 1  # index on the trajectory to start from
 
-    ekin_config = MPCConfigEXT()
+    # ekin_config = MPCConfigEXT()
     dyn_config = MPCConfigDYN()
     # ekin_config.DTK = kin_config.DTK = dyn_config.DTK = control_step / 1000.0
 
@@ -317,8 +298,8 @@ def main():  # after launching this you can run visualization.py to see the resu
     planner_pp = PurePursuitPlanner(conf, 0.805975 + 1.50876)  # 0.805975 + 1.50876
     planner_pp.waypoints = waypoints
 
-    planner_ekin_mpc = STMPCPlanner(model=ExtendedKinematicModel(config=MPCConfigEXT()), waypoints=waypoints,
-                                    config=MPCConfigEXT())
+    # planner_ekin_mpc = STMPCPlanner(model=ExtendedKinematicModel(config=MPCConfigEXT()), waypoints=waypoints,
+    #                                 config=MPCConfigEXT())
 
     planner_dyn_mpc = STMPCPlanner(model=DynamicBicycleModel(config=dyn_config), waypoints=waypoints,
                                    config=dyn_config)
@@ -391,6 +372,7 @@ def main():  # after launching this you can run visualization.py to see the resu
         # augmented_state = [vehicle_state.copy(), theta_MPCC]
         # break
         u = [1.0, 0.0, 0.0]
+        '''
         if model_to_use == 'pure_pursuit':
             # Regulator step pure pursuit
             speed, steer_angle = planner_pp.plan(obs['poses_x'][0], obs['poses_y'][0], obs['poses_theta'][0],
@@ -414,7 +396,9 @@ def main():  # after launching this you can run visualization.py to see the resu
             draw.reference_traj_show = np.array([mpc_ref_path_x, mpc_ref_path_y]).T
             draw.predicted_traj_show = np.array([mpc_pred_x, mpc_pred_y]).T
             print("use ext_kinematic")
-        elif model_to_use == "dynamic":
+
+        '''
+        if model_to_use == "dynamic":
             if vehicle_state[2] < 0.1:
                 u, mpc_ref_path_x, mpc_ref_path_y, mpc_pred_x, mpc_pred_y, mpc_ox, mpc_oy = planner_dyn_mpc.plan(
                     vehicle_state)
