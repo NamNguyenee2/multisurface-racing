@@ -3,9 +3,9 @@ import yaml
 import gym
 from argparse import Namespace
 from regulators.pure_pursuit import *
-from regulators.path_follow_mpcc import STMPCPlanner
-from regulators.path_follow_mpcc_Claude import *
-from models.extended_kinematic_mpcc import ExtendedKinematicModel
+from regulators.path_follow_mpcc import *
+# from regulators.path_follow_mpcc_Claude import *
+# from models.extended_kinematic_mpcc import ExtendedKinematicModel
 from models.dynamic_mpcc import DynamicBicycleModel
 from helpers.closest_point import *
 import numpy as np
@@ -17,73 +17,71 @@ from matplotlib.animation import FuncAnimation
 from scipy.interpolate import CubicSpline
 from scipy.optimize import minimize_scalar
 
-'''
-@dataclass
-class MPCConfigEXT:
-    NXK: int = 8  # length of kinematic state vector: z = [x, y, vx, yaw angle, vy, yaw rate, steering angle]
-    NU: int = 3  # length of input vector: u = = [acceleration, steering speed]
-    TK: int = 20  # finite time horizon length kinematic
+# @dataclass
+# class MPCConfigEXT:
+#     NXK: int = 8  # length of kinematic state vector: z = [x, y, vx, yaw angle, vy, yaw rate, steering angle]
+#     NU: int = 3  # length of input vector: u = = [acceleration, steering speed]
+#     TK: int = 20  # finite time horizon length kinematic
 
-    Rk: list = field(
-        default_factory=lambda: np.diag([0.000000001, 10.0, 1.0])
-    )  # input cost matrix, penalty for inputs - [accel, steering_speed]
-    Rdk: list = field(
-        default_factory=lambda: np.diag([0.000000001, 10.0, 1.0])
-    )  # input difference cost matrix, penalty for change of inputs - [accel, steering_speed]
-    Qk: list = field(
-        default_factory=lambda: np.diag([13.5, 13.5, 10.5, 15.0, 0.0, 0.0, 0.0, 0.0])
-        # [13.5, 13.5, 5.5, 13.0, 0.0, 0.0, 0.0]
-    )  # state error cost matrix, for the next (T) prediction time steps
-    Qfk: list = field(
-        default_factory=lambda: np.diag([13.5, 13.5, 10.5, 15.0, 0.0, 0.0, 0.0, 0.0])
-        # [13.5, 13.5, 5.5, 13.0, 0.0, 0.0, 0.0]
-    )  # final state error matrix, penalty  for the final state constraints
-    N_IND_SEARCH: int = 20  # Search index number
-    DTK: float = 0.1  # time step [s] kinematic
-    dlk: float = 3.0  # dist step [m] kinematic
-    LENGTH: float = 4.298  # Length of the vehicle [m]
-    WIDTH: float = 1.674  # Width of the vehicle [m]
-    LR: float = 1.50876
-    LF: float = 0.88392
-    WB: float = 0.88392 + 1.50876  # Wheelbase [m]
-    MAX_THETA: float = 1000.0  # maximum heading angle [deg]
-    MIN_THETA: float = 0.0  # minimum heading angle [deg]
-    MAX_VI: float = 45.0 
-    MIN_VI: float = 0.0
-    MIN_STEER: float = -0.4189  # maximum steering angle [rad]
-    MAX_STEER: float = 0.4189  # maximum steering angle [rad]
-    MAX_STEER_V: float = 3.2  # maximum steering speed [rad/s]
-    MAX_SPEED: float = 45.0  # maximum speed [m/s]
-    MIN_SPEED: float = 0.0  # minimum backward speed [m/s]
-    MAX_ACCEL: float = 11.5  # maximum acceleration [m/ss]
-    MAX_DECEL: float = -45.0  # maximum acceleration [m/ss]
+#     Rk: list = field(
+#         default_factory=lambda: np.diag([0.000000001, 10.0, 1.0])
+#     )  # input cost matrix, penalty for inputs - [accel, steering_speed]
+#     Rdk: list = field(
+#         default_factory=lambda: np.diag([0.000000001, 10.0, 1.0])
+#     )  # input difference cost matrix, penalty for change of inputs - [accel, steering_speed]
+#     Qk: list = field(
+#         default_factory=lambda: np.diag([13.5, 13.5, 10.5, 15.0, 0.0, 0.0, 0.0, 0.0])
+#         # [13.5, 13.5, 5.5, 13.0, 0.0, 0.0, 0.0]
+#     )  # state error cost matrix, for the next (T) prediction time steps
+#     Qfk: list = field(
+#         default_factory=lambda: np.diag([13.5, 13.5, 10.5, 15.0, 0.0, 0.0, 0.0, 0.0])
+#         # [13.5, 13.5, 5.5, 13.0, 0.0, 0.0, 0.0]
+#     )  # final state error matrix, penalty  for the final state constraints
+#     N_IND_SEARCH: int = 20  # Search index number
+#     DTK: float = 0.1  # time step [s] kinematic
+#     dlk: float = 3.0  # dist step [m] kinematic
+#     LENGTH: float = 4.298  # Length of the vehicle [m]
+#     WIDTH: float = 1.674  # Width of the vehicle [m]
+#     LR: float = 1.50876
+#     LF: float = 0.88392
+#     WB: float = 0.88392 + 1.50876  # Wheelbase [m]
+#     MAX_THETA: float = 1000.0  # maximum heading angle [deg]
+#     MIN_THETA: float = 0.0  # minimum heading angle [deg]
+#     MAX_VI: float = 45.0 
+#     MIN_VI: float = 0.0
+#     MIN_STEER: float = -0.4189  # maximum steering angle [rad]
+#     MAX_STEER: float = 0.4189  # maximum steering angle [rad]
+#     MAX_STEER_V: float = 3.2  # maximum steering speed [rad/s]
+#     MAX_SPEED: float = 45.0  # maximum speed [m/s]
+#     MIN_SPEED: float = 0.0  # minimum backward speed [m/s]
+#     MAX_ACCEL: float = 11.5  # maximum acceleration [m/ss]
+#     MAX_DECEL: float = -45.0  # maximum acceleration [m/ss]
 
-    MASS: float = 1225.887  # Vehicle mass
-'''
+#     MASS: float = 1225.887  # Vehicle mass
 
 @dataclass
 class MPCConfigDYN:
     NXK: int = 8  # length of kinematic state vector: z = [x, y, vx, yaw angle, vy, yaw rate, steering angle]
     NU: int = 3  # length of input vector: u = = [acceleration, steering speed]
-    TK: int = 10  # finite time horizon length kinematic
+    TK: int = 15  # finite time horizon length kinematic
 
     Rk: list = field(
-        default_factory=lambda: np.diag([0.000000001, 1.0, 1.0])
+        default_factory=lambda: np.diag([0.000000001, 0.1, 0.001])
     )  # input cost matrix, penalty for inputs - [accel, steering_speed]
     Rdk: list = field(
-        default_factory=lambda: np.diag([0.000000001, 1.0, 1.0])
+        default_factory=lambda: np.diag([0.000000001, 0.1, 0.001])
     )  # input difference cost matrix, penalty for change of inputs - [accel, steering_speed]
     Qk: list = field(
-        default_factory=lambda: np.diag([20.5, 20.5, 0., 0.0, 0.0, 0.0, 0.0, 0.0])
+        default_factory=lambda: np.diag([20.5, 20.5, 0.0001, 0.0, 0.0, 0.0, 0.0, 0.0])
         # [13.5, 13.5, 5.5, 13.0, 0.0, 0.0, 0.0]
     )  # state error cost matrix, for the next (T) prediction time steps
     Qfk: list = field(
-        default_factory=lambda: np.diag([20.5, 20.5, 0., 0.0, 0.0, 0.0, 0.0, 0.0])
+        default_factory=lambda: np.diag([30.5, 30.5, 0.00001, 0.0, 0.0, 0.0, 0.0, 0.0])
         # [13.5, 13.5, 5.5, 13.0, 0.0, 0.0, 0.0]
     )  # final state error matrix, penalty  for the final state constraints
-    q_contour: float = 30.0
+    q_contour: float = 500.0
     q_lag: float = 100.0
-    q_theta: float = -10000.0
+    q_theta: float = -20.0
     N_IND_SEARCH: int = 20  # Search index number
     DTK: float = 0.05  # time step [s] kinematic
     dlk: float = 3.0  # dist step [m] kinematic
@@ -165,7 +163,7 @@ class TrackRef:
         dist_start_end = np.sqrt((self.x[0] - self.x[-1])**2 + (self.y[0] - self.y[-1])**2)
         
         if dist_start_end > 0.001: # If gap is larger than 1mm
-            print(f"Closing the track loop... (Gap was {dist_start_end:.3f}m)")
+            # print(f"Closing the track loop... (Gap was {dist_start_end:.3f}m)")
             # Append the starting point to the end
             self.x = np.append(self.x, self.x[0])
             self.y = np.append(self.y, self.y[0])
@@ -215,9 +213,11 @@ class TrackRef:
             y_tr = self.spline_y(theta_wrapped)
             # print(self.track_length)
             return (x_car - x_tr)**2 + (y_car - y_tr)**2
-        # We allow bounds to go negative or > length because cost_fn handles wrapping
-        window = 2.0 
-        bnds = (theta_guess - window, theta_guess + window)
+        
+        # max_gap = self.track_length
+        # print("max_gap:", max_gap)
+        # self.optimal_window = (max_gap / 2.0) + 0.5
+        bnds = (0, 1000.0)
         res = minimize_scalar(cost_fn, bounds=bnds, method='bounded')
         # Final result wrapped to [0, track_length]
         theta_k = res.x % self.track_length
@@ -247,9 +247,6 @@ def main():  # after launching this you can run visualization.py to see the resu
     # ekin_config = MPCConfigEXT()
     dyn_config = MPCConfigDYN()
     # ekin_config.DTK = kin_config.DTK = dyn_config.DTK = control_step / 1000.0
-
-    # Creating the single-track Motion planner and Controller
-
     # Init Pure-Pursuit regulator
     work = {'mass': 1225.88, 'lf': 0.80597534362552312, 'tlad': 10.6461887897713965, 'vgain': 1.0}
 
@@ -297,9 +294,12 @@ def main():  # after launching this you can run visualization.py to see the resu
     # init controllers
     planner_pp = PurePursuitPlanner(conf, 0.805975 + 1.50876)  # 0.805975 + 1.50876
     planner_pp.waypoints = waypoints
-
+    
     # planner_ekin_mpc = STMPCPlanner(model=ExtendedKinematicModel(config=MPCConfigEXT()), waypoints=waypoints,
     #                                 config=MPCConfigEXT())
+    
+    # planner_ekin_mpc = STMPCPlanner(model=DynamicBicycleModel(config=dyn_config), waypoints=waypoints,
+    #                                 config=dyn_config)
 
     planner_dyn_mpc = STMPCPlanner(model=DynamicBicycleModel(config=dyn_config), waypoints=waypoints,
                                    config=dyn_config)
@@ -351,7 +351,8 @@ def main():  # after launching this you can run visualization.py to see the resu
 
 
     # print('Model used: %s' % model_to_use)
-    
+    count = 0
+    theta_list = []
     while not done:
         
         # print("env.sim.agents[0].state:", env.sim.agents[0].state)
@@ -365,14 +366,12 @@ def main():  # after launching this you can run visualization.py to see the resu
                                   env.sim.agents[0].state[2],  # steering angle
                                   ]) + np.random.randn(7) * 0.00001
         theta_k = track.get_current_theta(vehicle_state)
+        print("theta_k:", theta_k)
+        theta_list.append(theta_k)
         vehicle_state = np.concatenate((vehicle_state, [theta_k]))
 
-        # print("theta_k:", theta_k, "x_ref:", x_ref, "y_ref:", y_ref, "phi_ref:", phi_k)
-        
-        # augmented_state = [vehicle_state.copy(), theta_MPCC]
         # break
         u = [1.0, 0.0, 0.0]
-        '''
         if model_to_use == 'pure_pursuit':
             # Regulator step pure pursuit
             speed, steer_angle = planner_pp.plan(obs['poses_x'][0], obs['poses_y'][0], obs['poses_theta'][0],
@@ -386,19 +385,8 @@ def main():  # after launching this you can run visualization.py to see the resu
 
             error_drive = speed - env.sim.agents[0].state[3]
             u[0] = 8.0 * error_drive
-
-        elif model_to_use == "ext_kinematic":
-            u, mpc_ref_path_x, mpc_ref_path_y, mpc_pred_x, mpc_pred_y, mpc_ox, mpc_oy = planner_ekin_mpc.plan(
-                vehicle_state)
-            u[0] = u[0] / planner_ekin_mpc.config.MASS  # Force to acceleration
-            # u[0] = -u[1]
-            # draw predicted states and reference trajectory
-            draw.reference_traj_show = np.array([mpc_ref_path_x, mpc_ref_path_y]).T
-            draw.predicted_traj_show = np.array([mpc_pred_x, mpc_pred_y]).T
-            print("use ext_kinematic")
-
-        '''
-        if model_to_use == "dynamic":
+        
+        elif model_to_use == "dynamic":
             if vehicle_state[2] < 0.1:
                 u, mpc_ref_path_x, mpc_ref_path_y, mpc_pred_x, mpc_pred_y, mpc_ox, mpc_oy = planner_dyn_mpc.plan(
                     vehicle_state)
@@ -426,7 +414,7 @@ def main():  # after launching this you can run visualization.py to see the resu
 
    
 
-        print('Model used: %s' % model_to_use)
+        # print('Model used: %s' % model_to_use)
         # Simulation step
         step_reward = 0.0
         for i in range(num_of_sim_steps):
