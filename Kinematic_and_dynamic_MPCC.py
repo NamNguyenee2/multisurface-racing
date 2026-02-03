@@ -65,10 +65,10 @@ class MPCConfigDYN:
     TK: int = 15  # finite time horizon length kinematic
 
     Rk: list = field(
-        default_factory=lambda: np.diag([0.000000001, 0.1, 0.001])
+        default_factory=lambda: np.diag([0.000000001, 0.001, 0.001])
     )  # input cost matrix, penalty for inputs - [accel, steering_speed]
     Rdk: list = field(
-        default_factory=lambda: np.diag([0.000000001, 0.1, 0.001])
+        default_factory=lambda: np.diag([0.000000001, 0.001, 0.001])
     )  # input difference cost matrix, penalty for change of inputs - [accel, steering_speed]
     Qk: list = field(
         default_factory=lambda: np.diag([20.5, 20.5, 0.0001, 0.0, 0.0, 0.0, 0.0, 0.0])
