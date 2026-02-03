@@ -5,7 +5,7 @@ from scipy import integrate
 import time
 from dataclasses import dataclass, field
 from numba import njit, prange
-
+import casadi as ca
 
 @njit(cache=True)
 def get_model_matrix_cf_batch_jit(state, control_input, TK, MASS, I_Z, LF, LR, TORQUE_SPLIT, BR, DR, BF, CF, DF, CM, CR, CR0, CR2, A, B):
@@ -537,7 +537,7 @@ class DynamicBicycleModel:
                 states[:, i - 1][3])) * self.config.DTK
             states[:, i][3] = states[:, i - 1][3] + (states[:, i - 1][5]) * self.config.DTK
         return states
-
+    
 
 @dataclass
 class MPCConfigDYNTest:

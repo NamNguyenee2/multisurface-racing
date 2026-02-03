@@ -4,7 +4,6 @@ import gym
 from argparse import Namespace
 from regulators.pure_pursuit import *
 from regulators.path_follow_mpcc import *
-# from regulators.path_follow_mpcc_Claude import *
 # from models.extended_kinematic_mpcc import ExtendedKinematicModel
 from models.dynamic_mpcc import DynamicBicycleModel
 from helpers.closest_point import *
