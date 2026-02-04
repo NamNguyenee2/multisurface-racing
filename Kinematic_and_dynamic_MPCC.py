@@ -1,452 +1,329 @@
+# MIT License
+# MPCC Implementation - Converted from ST-MPC
+# Key changes: 
+# - State augmented with theta (arc length) and v_theta (progress velocity)
+# - Contouring error (lateral deviation) + Lag error (longitudinal deviation)
+# - Progress maximization term
+
 import time
-import yaml
-import gym
-from argparse import Namespace
-from regulators.pure_pursuit import *
-from regulators.path_follow_mpcc import *
-# from models.extended_kinematic_mpcc import ExtendedKinematicModel
-from models.dynamic_mpcc import DynamicBicycleModel
-from helpers.closest_point import *
+from dataclasses import dataclass, field
+import cvxpy
 import numpy as np
+from scipy.linalg import block_diag
+from scipy.sparse import block_diag, csc_matrix, diags
+from numba import njit
+import copy
+from scipy.interpolate import make_interp_spline, CubicSpline
 
-from pyglet.gl import GL_POINTS
-import json
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
-from scipy.interpolate import CubicSpline
-from scipy.optimize import minimize_scalar
-
-# @dataclass
-# class MPCConfigEXT:
-#     NXK: int = 8  # length of kinematic state vector: z = [x, y, vx, yaw angle, vy, yaw rate, steering angle]
-#     NU: int = 3  # length of input vector: u = = [acceleration, steering speed]
-#     TK: int = 20  # finite time horizon length kinematic
-
-#     Rk: list = field(
-#         default_factory=lambda: np.diag([0.000000001, 10.0, 1.0])
-#     )  # input cost matrix, penalty for inputs - [accel, steering_speed]
-#     Rdk: list = field(
-#         default_factory=lambda: np.diag([0.000000001, 10.0, 1.0])
-#     )  # input difference cost matrix, penalty for change of inputs - [accel, steering_speed]
-#     Qk: list = field(
-#         default_factory=lambda: np.diag([13.5, 13.5, 10.5, 15.0, 0.0, 0.0, 0.0, 0.0])
-#         # [13.5, 13.5, 5.5, 13.0, 0.0, 0.0, 0.0]
-#     )  # state error cost matrix, for the next (T) prediction time steps
-#     Qfk: list = field(
-#         default_factory=lambda: np.diag([13.5, 13.5, 10.5, 15.0, 0.0, 0.0, 0.0, 0.0])
-#         # [13.5, 13.5, 5.5, 13.0, 0.0, 0.0, 0.0]
-#     )  # final state error matrix, penalty  for the final state constraints
-#     N_IND_SEARCH: int = 20  # Search index number
-#     DTK: float = 0.1  # time step [s] kinematic
-#     dlk: float = 3.0  # dist step [m] kinematic
-#     LENGTH: float = 4.298  # Length of the vehicle [m]
-#     WIDTH: float = 1.674  # Width of the vehicle [m]
-#     LR: float = 1.50876
-#     LF: float = 0.88392
-#     WB: float = 0.88392 + 1.50876  # Wheelbase [m]
-#     MAX_THETA: float = 1000.0  # maximum heading angle [deg]
-#     MIN_THETA: float = 0.0  # minimum heading angle [deg]
-#     MAX_VI: float = 45.0 
-#     MIN_VI: float = 0.0
-#     MIN_STEER: float = -0.4189  # maximum steering angle [rad]
-#     MAX_STEER: float = 0.4189  # maximum steering angle [rad]
-#     MAX_STEER_V: float = 3.2  # maximum steering speed [rad/s]
-#     MAX_SPEED: float = 45.0  # maximum speed [m/s]
-#     MIN_SPEED: float = 0.0  # minimum backward speed [m/s]
-#     MAX_ACCEL: float = 11.5  # maximum acceleration [m/ss]
-#     MAX_DECEL: float = -45.0  # maximum acceleration [m/ss]
-
-#     MASS: float = 1225.887  # Vehicle mass
-
-@dataclass
-class MPCConfigDYN:
-    NXK: int = 8  # length of kinematic state vector: z = [x, y, vx, yaw angle, vy, yaw rate, steering angle]
-    NU: int = 3  # length of input vector: u = = [acceleration, steering speed]
-    TK: int = 15  # finite time horizon length kinematic
-
-    Rk: list = field(
-        default_factory=lambda: np.diag([0.000000001, 0.001, 0.001])
-    )  # input cost matrix, penalty for inputs - [accel, steering_speed]
-    Rdk: list = field(
-        default_factory=lambda: np.diag([0.000000001, 0.001, 0.001])
-    )  # input difference cost matrix, penalty for change of inputs - [accel, steering_speed]
-    Qk: list = field(
-        default_factory=lambda: np.diag([20.5, 20.5, 0.0001, 0.0, 0.0, 0.0, 0.0, 0.0])
-        # [13.5, 13.5, 5.5, 13.0, 0.0, 0.0, 0.0]
-    )  # state error cost matrix, for the next (T) prediction time steps
-    Qfk: list = field(
-        default_factory=lambda: np.diag([30.5, 30.5, 0.00001, 0.0, 0.0, 0.0, 0.0, 0.0])
-        # [13.5, 13.5, 5.5, 13.0, 0.0, 0.0, 0.0]
-    )  # final state error matrix, penalty  for the final state constraints
-    q_contour: float = 500.0
-    q_lag: float = 100.0
-    q_theta: float = -20.0
-    N_IND_SEARCH: int = 20  # Search index number
-    DTK: float = 0.05  # time step [s] kinematic
-    dlk: float = 3.0  # dist step [m] kinematic
-    LENGTH: float = 4.298  # Length of the vehicle [m]
-    WIDTH: float = 1.674  # Width of the vehicle [m]
-    LR: float = 1.50876
-    LF: float = 0.88392
-    WB: float = 0.88392 + 1.50876  # Wheelbase [m]
-    MAX_THETA: float = 1000.0  # maximum heading angle [deg]
-    MIN_THETA: float = 0.0  # minimum heading angle [deg]
-    MAX_VI: float = 45.0 
-    MIN_VI: float = 0.0
-    MIN_STEER: float = -0.4189  # maximum steering angle [rad]
-    MAX_STEER: float = 0.4189  # maximum steering angle [rad]
-    MAX_STEER_V: float = 3.2  # maximum steering speed [rad/s]
-    MAX_SPEED: float = 45.0  # maximum speed [m/s]
-    MIN_SPEED: float = 0.0  # minimum backward speed [m/s]
-    MAX_ACCEL: float = 11.5  # maximum acceleration [m/ss]
-    MAX_DECEL: float = -45.0  # maximum acceleration [m/ss]
-
-    # model parameters
-    MASS: float = 1225.887  # Vehicle mass
-    I_Z: float = 1560.3729  # Vehicle inertia
-    TORQUE_SPLIT: float = 0.0  # Torque distribution
-
-    BR: float = 15.9504  # Pacejka tire model parameter B - rear tire
-    CR: float = 1.3754  # Pacejka tire model parameter C - rear tire
-    DR: float = 4500.9280  # Pacejka tire model parameter D - rear tire
-
-    BF: float = 9.4246  # Pacejka tire model parameter B - front tire
-    CF: float = 5.9139  # Pacejka tire model parameter C - front tire
-    DF: float = 4500.8218  # Pacejka tire model parameter D - front tire
-
-    # https://arxiv.org/pdf/1905.05150.pdf - equation (7)
-    CM: float = 0.9459
-    CR0: float = 2.3451
-    CR2: float = -0.0095
-
-
-def draw_point(e, point, colour):
-    scaled_point = 50. * point
-    ret = e.batch.add(1, GL_POINTS, None, ('v3f/stream', [scaled_point[0], scaled_point[1], 0]), ('c3B/stream', colour))
-    return ret
-
-
-class DrawDebug:
-    def __init__(self):
-        self.reference_traj_show = np.array([[0, 0]])
-        self.predicted_traj_show = np.array([[0, 0]])
-        self.dyn_obj_drawn = []
-        self.f = 0
-
-    def draw_debug(self, e):
-        # delete dynamic objects
-        while len(self.dyn_obj_drawn) > 0:
-            if self.dyn_obj_drawn[0] is not None:
-                self.dyn_obj_drawn[0].delete()
-            self.dyn_obj_drawn.pop(0)
-
-        # spawn new objects
-        for p in self.reference_traj_show:
-            self.dyn_obj_drawn.append(draw_point(e, p, [255, 0, 0]))
-
-        for p in self.predicted_traj_show:
-            self.dyn_obj_drawn.append(draw_point(e, p, [0, 255, 0]))
-
-class TrackRef:
+class TrackRef_MPCC:
     def __init__(self, waypoints):
-        """
-        Step 1: Create continuous track parameterization.
-        waypoints: np.array shape (N, M), columns [x, y, ...]
-        """
         # Extract X and Y coordinates
-        self.x = waypoints[:, 0]
-        self.y = waypoints[:, 1]
-        
-        # --- FIX: FORCE CLOSE THE LOOP ---
-        # Check if the last point is far from the first point
-        dist_start_end = np.sqrt((self.x[0] - self.x[-1])**2 + (self.y[0] - self.y[-1])**2)
-        
-        if dist_start_end > 0.001: # If gap is larger than 1mm
-            # print(f"Closing the track loop... (Gap was {dist_start_end:.3f}m)")
-            # Append the starting point to the end
-            self.x = np.append(self.x, self.x[0])
-            self.y = np.append(self.y, self.y[0])
-        else:
-            # Even if they are close, enforce exact equality for scipy
-            self.x[-1] = self.x[0]
-            self.y[-1] = self.y[0]
+        if np.linalg.norm(waypoints[0] - waypoints[-1]) > 200:
+            waypoints = np.vstack([waypoints, waypoints[0]])
+        self.x = waypoints[:, 1]
 
-        # 1. Calculate distance between each consecutive point
-        dx = np.diff(self.x)
-        dy = np.diff(self.y)
-        dists = np.sqrt(dx**2 + dy**2)
-        
-        # 2. Cumulative sum to get theta (arc length) for each point
-        # [0, d1, d1+d2, ..., Length]
-        self.theta_arr = np.concatenate(([0], np.cumsum(dists)))
-        self.track_length = self.theta_arr[-1]
-        
-        # 3. Create Splines: X(theta) and Y(theta)
-        # bc_type='periodic' ensures the finish line connects smoothly to start
+        self.y = waypoints[:, 2]
+
+        self.track_length = len(self.x)
+
+        self.theta_arr = np.linspace(0, self.track_length, num=len(self.x))
         self.spline_x = CubicSpline(self.theta_arr, self.x, bc_type='periodic')
         self.spline_y = CubicSpline(self.theta_arr, self.y, bc_type='periodic')
-        
-    def get_current_theta(self, vehicle_state):
-        """
-        Calculates the exact theta (arc length) closest to the vehicle.
-        Combines Coarse Search (discrete) + Fine Search (optimization).
-        """
-        x_car = vehicle_state[0]
-        y_car = vehicle_state[1]
 
-        # --- A. Coarse Search (Discrete) ---
-        # Check all discrete waypoints to find the approximate closest one.
-        dx = self.x - x_car
-        dy = self.y - y_car
-        dists_sq = dx**2 + dy**2
-        
-        min_index = np.argmin(dists_sq)
-        theta_guess = self.theta_arr[min_index]
+    def _wrap_theta(self, theta):
+        return theta % self.track_length
 
-        # --- B. Fine Search (Continuous Optimization) ---
-        # Define cost function: Squared distance from car to spline at theta
-        def cost_fn(theta):
-            # Wrap theta for circular tracks (e.g., -1 becomes 99)
+    def get_position(self, theta):
+        theta = self._wrap_theta(theta)
+        x = float(self.spline_x(theta))
+        y = float(self.spline_y(theta))
+        return x, y
+
+    def get_phi(self, theta):
+        theta = self._wrap_theta(theta)
+        dx = self.spline_x(theta, 1)
+        dy = self.spline_y(theta, 1)
+        return float(np.arctan2(dy, dx))
+
+class STMPCCPlanner:
+    """
+    Model Predictive Contouring Control (MPCC) Planner
+    
+    State vector (already includes theta):
+    x = [x, y, v, phi, vx, vy, omega, theta]  (NXK = 8)
+    
+    Control input (now includes v_theta):
+    u = [acceleration, steering_angle, v_theta]  (NU = 3)
+    
+    Where:
+    - theta: arc length position on track [0, track_length] (STATE)
+    - v_theta: rate of progress along track (CONTROL INPUT)
+    """
+
+    def __init__(self, model, config, waypoints=None, track=None):
+        self.waypoints = waypoints
+        self.model = model
+        self.config = config
+        self.track = track
+        
+        # Initialize track reference system
+        self.TrackRef = TrackRef_MPCC(self.waypoints)
+        self.track_length = self.TrackRef.track_length
+        
+        # Assume theta is the last state (index -1)
+        self.theta_index = self.config.NXK - 1
+        
+        # MPC state variables (theta already included in NXK)
+        self.input_o = np.zeros(self.config.NU) * np.NAN  # Now NU = 3 (accel, steering, v_theta)
+        self.states_output = np.ones((self.config.NXK, self.config.TK +1)) * np.NaN
+        
+        # MPCC weights
+        self.q_contour = self.config.q_contour      # Contouring error weight
+        self.q_lag = self.config.q_lag           # Lag error weight  
+        self.q_theta = self.config.q_theta        # Progress maximization (negative = reward)
+        
+        self.mpc_prob_init()
+
+
+    def plan(self, states, waypoints=None):
+        """
+        Main planning function
+        """
+        if waypoints is not None:
+            self.waypoints = waypoints
+            self.TrackRef = TrackRef_MPCC(self.waypoints)
+            self.track_length = self.TrackRef.track_length
+
+        u, mpc_ref_path_x, mpc_ref_path_y, mpc_pred_x, mpc_pred_y, mpc_ox, mpc_oy = self.MPCC_Control(states)
+        return u, mpc_ref_path_x, mpc_ref_path_y, mpc_pred_x, mpc_pred_y, mpc_ox, mpc_oy
+
+    def get_reference_trajectory_mpcc(self, theta_array):
+        ref_traj = np.zeros((self.config.NXK + 2, self.config.TK + 1))
+        
+        for i, theta in enumerate(theta_array):
             theta_wrapped = theta % self.track_length
-            x_tr = self.spline_x(theta_wrapped)
-            y_tr = self.spline_y(theta_wrapped)
-            # print(self.track_length)
-            return (x_car - x_tr)**2 + (y_car - y_tr)**2
-        
-        # max_gap = self.track_length
-        # print("max_gap:", max_gap)
-        # self.optimal_window = (max_gap / 2.0) + 0.5
-        bnds = (0, 1000.0)
-        res = minimize_scalar(cost_fn, bounds=bnds, method='bounded')
-        # Final result wrapped to [0, track_length]
-        theta_k = res.x % self.track_length
-        return theta_k
-
-def main():  # after launching this you can run visualization.py to see the results
-    """
-    main entry point
-    """
-
-    # Choose program parameters
-    model_to_use = 'dynamic'  # options: ext_kinematic, pure_pursuit, dynamic
-    map_name = 'rounded_rectangle'  # Nuerburgring, SaoPaulo, rounded_rectangle, l_shape, BrandsHatch, DualLaneChange, Austin, Budapest, Catalunya
-    # Hockenheim, IMS, Melbourne, MexicoCity, Montreal, Monza, MoscowRaceway, Oschersleben, Sakhir, Sepang, Silverstone, Sochi, Spa, Spielberg
-    # YasMarina
-    rotate_map = False  # !!!! If the car is spawning with bad orientation change value here !!!! TODO Fix here so this is not needed anymore
-    use_dyn_friction = False
-    constant_friction = 0.5
-    control_step = 100.0  # ms
-    render_every = 40  # render graphics every n simulation steps
-    constant_speed = False
-    constant_speed_value = 8.0
-    velocity_profile_multiplier = 0.9
-    number_of_laps = 50
-    start_point = 1  # index on the trajectory to start from
-
-    # ekin_config = MPCConfigEXT()
-    dyn_config = MPCConfigDYN()
-    # ekin_config.DTK = kin_config.DTK = dyn_config.DTK = control_step / 1000.0
-    # Init Pure-Pursuit regulator
-    work = {'mass': 1225.88, 'lf': 0.80597534362552312, 'tlad': 10.6461887897713965, 'vgain': 1.0}
-
-    # Load map config file
-    with open('configs/config_%s.yaml' % map_name) as file:
-        conf_dict = yaml.load(file, Loader=yaml.FullLoader)
-    conf = Namespace(**conf_dict)
-
-    if use_dyn_friction:
-        if map_name == 'l_shape':
-            tpamap_name = './maps/l_shape/friction_data/l_shape_l720_track_tpamap.csv'
-            tpadata_name = './maps/l_shape/friction_data/l_shape_l720_track_tpadata.json'
-        if map_name == 'DualLaneChange':
-            # tpamap_name = './maps/DualLaneChange/friction_data/DualLaneChange_track_tpamap.csv'
-            # tpamap_name = './maps/DualLaneChange/friction_data/DualLaneChange5z_track_tpamap.csv'
-            tpamap_name = './maps/DualLaneChange/friction_data/DualLaneChange3zv2_track_tpamap.csv'
-            # tpadata_name = './maps/DualLaneChange/friction_data/DualLaneChange_track_tpadata.json'
-            # tpadata_name = './maps/DualLaneChange/friction_data/DualLaneChange5z_track_tpadata.json'
-            tpadata_name = './maps/DualLaneChange/friction_data/DualLaneChange3zv2_track_tpadata.json'
-        if map_name == 'SaoPaulo':
-            tpamap_name = './maps/SaoPaulo/friction_data/SaoPaulo_track_tpamap.csv'
-            tpadata_name = './maps/SaoPaulo/friction_data/SaoPaulo_track_tpadata.json'
-        if map_name == 'Nuerburgring':
-            tpamap_name = './maps/Nuerburgring/friction_data/Nuerburgring_tpamap.csv'
-            tpadata_name = './maps/Nuerburgring/friction_data/Nuerburgring_tpadata.json'
-
-        tpamap = np.loadtxt(tpamap_name, delimiter=';', skiprows=1)
-
-        tpadata = {}
-        with open(tpadata_name) as f:
-            tpadata = json.load(f)
-
-    raceline = np.loadtxt(conf.wpt_path, delimiter=";", skiprows=3)
-    waypoints = np.array(raceline)
-    track = TrackRef(waypoints)
-    if rotate_map == True:
-        waypoints[:, 3] += 1.5707963268
-
-    if constant_speed:
-        # waypoints[:, 5] = waypoints[:, 5] * 2.0
-        waypoints[:, 5] = np.ones((waypoints[:, 5].shape[0],)) * constant_speed_value
-    else:
-        waypoints[:, 5] *= velocity_profile_multiplier
-
-    # init controllers
-    planner_pp = PurePursuitPlanner(conf, 0.805975 + 1.50876)  # 0.805975 + 1.50876
-    planner_pp.waypoints = waypoints
+            # Reference position
+            x_ref, y_ref = self.TrackRef.get_position(theta_wrapped)
+            ref_traj[0, i] = x_ref
+            ref_traj[1, i] = y_ref
+      
+        return ref_traj
     
-    # planner_ekin_mpc = STMPCPlanner(model=ExtendedKinematicModel(config=MPCConfigEXT()), waypoints=waypoints,
-    #                                 config=MPCConfigEXT())
+    def mpc_prob_init(self):
+        self.xk = cvxpy.Variable((self.config.NXK, self.config.TK + 1))
+        self.uk = cvxpy.Variable((self.config.NU, self.config.TK))  # Now includes v_theta
+        
+        # Parameters
+        self.x0k = cvxpy.Parameter((self.config.NXK,))
+        self.x0k.value = np.zeros((self.config.NXK,))
+        
+        # Track reference positions at predicted theta values
+        self.ref_positions_k = cvxpy.Parameter((2, self.config.TK + 1))  # [x_ref, y_ref]
+        self.ref_positions_k.value = np.zeros((2, self.config.TK + 1))
+        
+        # Tangent and normal vectors at each prediction point
+        self.sin_phi_k = cvxpy.Parameter(self.config.TK + 1)
+        self.cos_phi_k = cvxpy.Parameter(self.config.TK + 1)
+        self.sin_phi_k.value = np.zeros(self.config.TK + 1)
+        self.cos_phi_k.value = np.zeros(self.config.TK + 1)
+            
+        objective = 0.0
+        constraints = []
     
-    # planner_ekin_mpc = STMPCPlanner(model=DynamicBicycleModel(config=dyn_config), waypoints=waypoints,
-    #                                 config=dyn_config)
 
-    planner_dyn_mpc = STMPCPlanner(model=DynamicBicycleModel(config=dyn_config), waypoints=waypoints,
-                                   config=dyn_config)
+        for t in range(self.config.TK):
+            objective += cvxpy.quad_form(self.uk[:, t], self.config.Rk)
 
-    # print("waypoints shape:", waypoints[0])
-    # init graphics
-    draw = DrawDebug()
-
-    def render_callback(env_renderer):
-
-        e = env_renderer
-
-        # update camera to follow car
-        x = e.cars[0].vertices[::2]
-        y = e.cars[0].vertices[1::2]
-        top, bottom, left, right = max(y), min(y), min(x), max(x)
-        e.score_label.x = left
-        e.score_label.y = top - 7000
-        e.left = left - 3000
-        e.right = right + 3000
-        e.top = top + 3000
-        e.bottom = bottom - 3000
-
-        planner_pp.render_waypoints(e)
-        draw.draw_debug(e)
-
-    # MB - reference point: center of mass
-    # dynamic_ST - reference point: center of mass
-
-    env = gym.make('f110_gym:f110-v0', map=conf.map_path, map_ext=conf.map_ext,
-                   num_agents=1, timestep=0.001, model='MB', drive_control_mode='acc',
-                   steering_control_mode='vel')
-
-    env.add_render_callback(render_callback)
-    # init vector = [x,y,yaw,steering angle, velocity, yaw_rate, beta]
-    obs, step_reward, done, info = env.reset(
-        np.array([[waypoints[start_point, 1], waypoints[start_point, 2], waypoints[start_point, 3], 0.0, 8.0, 0.0, 0.0]]))
-    env.render()
-
-    laptime = 0.0
-    start = time.time()
-    last_render = 0
-
-    # init logger
-    log = {'time': [], 'x': [], 'y': [], 'lap_n': [], 'vx': [], 'v_ref': [], 'tracking_error': []}
-
-    # calc number of sim steps per one control step
-    num_of_sim_steps = int(control_step / (env.timestep * 1000.0))
-
-
-    # print('Model used: %s' % model_to_use)
-    count = 0
-    theta_list = []
-    while not done:
+        for t in range(self.config.TK - 1):
+            u_diff = self.uk[:, t+1] - self.uk[:, t]
+            objective += cvxpy.quad_form(u_diff, self.config.Rdk)
         
-        # print("env.sim.agents[0].state:", env.sim.agents[0].state)
-        # Regulator step MPC
-        vehicle_state = np.array([env.sim.agents[0].state[0],  # x
-                                  env.sim.agents[0].state[1],  # y
-                                  env.sim.agents[0].state[3],  # vx
-                                  env.sim.agents[0].state[4],  # yaw angle
-                                  env.sim.agents[0].state[10],  # vy
-                                  env.sim.agents[0].state[5],  # yaw rate
-                                  env.sim.agents[0].state[2],  # steering angle
-                                  ]) + np.random.randn(7) * 0.00001
-        theta_k = track.get_current_theta(vehicle_state)
-        print("theta_k:", theta_k)
-        theta_list.append(theta_k)
-        vehicle_state = np.concatenate((vehicle_state, [theta_k]))
-
-        # break
-        u = [1.0, 0.0, 0.0]
-        if model_to_use == 'pure_pursuit':
-            # Regulator step pure pursuit
-            speed, steer_angle = planner_pp.plan(obs['poses_x'][0], obs['poses_y'][0], obs['poses_theta'][0],
-                                                 work['tlad'],
-                                                 work['vgain'])
-
-            draw.reference_traj_show = np.array([[obs['poses_x'][0]], [obs['poses_y'][0]]]).T
-
-            error_steer = steer_angle - env.sim.agents[0].state[2]
-            u[1] = 10.0 * error_steer
-
-            error_drive = speed - env.sim.agents[0].state[3]
-            u[0] = 8.0 * error_drive
+        # 3. MPCC-specific costs: Contouring error + Lag error + Progress maximization
+        for t in range(self.config.TK + 1):
+            # Position error
+            dx = self.xk[0, t] - self.ref_positions_k[0, t]
+            dy = self.xk[1, t] - self.ref_positions_k[1, t]
+            
+            # Contouring error: e_c = sin(phi) * dx + cos(phi) * dy
+            e_c = self.sin_phi_k[t] * dx + self.cos_phi_k[t] * dy
+            
+            # Lag error: e_l = -cos(phi) * dx - sin(phi) * dy
+            e_l = -self.cos_phi_k[t] * dx - self.sin_phi_k[t] * dy
+            
+            objective += self.q_contour * cvxpy.square(e_c)
+            objective += self.q_lag * cvxpy.square(e_l)
+            
+        # 4. Progress maximization: Reward high v_theta values
+        for t in range(self.config.TK):
+            objective += self.q_theta * self.uk[2, t]  
         
-        elif model_to_use == "dynamic":
-            if vehicle_state[2] < 0.1:
-                u, mpc_ref_path_x, mpc_ref_path_y, mpc_pred_x, mpc_pred_y, mpc_ox, mpc_oy = planner_dyn_mpc.plan(
-                    vehicle_state)
-            else:
-                u, mpc_ref_path_x, mpc_ref_path_y, mpc_pred_x, mpc_pred_y, mpc_ox, mpc_oy = planner_dyn_mpc.plan(
-                    vehicle_state)
+        # ========== DYNAMICS CONSTRAINTS ==========
+        # Vehicle dynamics for first (NXK-1) states
+        A_block = []
+        B_block = []
+        C_block = []
+        path_predict = np.zeros((self.config.NXK, self.config.TK + 1))
+        input_predict = np.zeros((self.config.NU, self.config.TK + 1))
+        
+        for t in range(self.config.TK):
+            # Get linearized dynamics for vehicle states (excluding theta for now)
+            A, B, C = self.model.get_model_matrix(path_predict[:, t], input_predict[:, t])
+            A_block.append(A)
+            B_block.append(B)
+            C_block.extend(C)
+  
+        A_block = block_diag(tuple(A_block))
+        B_block = block_diag(tuple(B_block))
+        C_block = np.array(C_block)
 
-            u[0] = u[0] / planner_dyn_mpc.config.MASS  # Force to acceleration
+        m, n = A_block.shape
+        self.Annz_k = cvxpy.Parameter(A_block.nnz)
+        data = np.ones(self.Annz_k.size)
+        rows = A_block.row * n + A_block.col
+        cols = np.arange(self.Annz_k.size)
+        Indexer = csc_matrix((data, (rows, cols)), shape=(m * n, self.Annz_k.size))
 
-            # draw predicted states and reference trajectory
-            draw.reference_traj_show = np.array([mpc_ref_path_x, mpc_ref_path_y]).T
-            draw.predicted_traj_show = np.array([mpc_pred_x, mpc_pred_y]).T
+        # Setting sparse matrix data
+        self.Annz_k.value = A_block.data
 
-        _, tracking_error, _, _, n_point = nearest_point_on_trajectory(np.array([env.sim.agents[0].state[0], env.sim.agents[0].state[1]]),
-                                                                       np.array([waypoints[:, 1], waypoints[:, 2]]).T)
+        # Now we use this sparse version instead of the old A_ block matrix
+        self.Ak_ = cvxpy.reshape(Indexer @ self.Annz_k, (m, n), order="C")
 
-        # set correct friction to the environment
-        if use_dyn_friction:
-            min_id = get_closest_point_vectorized(np.array([obs['poses_x'][0], obs['poses_y'][0]]), np.array(tpamap))
-            env.params['tire_p_dy1'] = tpadata[str(min_id)][0] * 0.9  # mu_y
-            env.params['tire_p_dx1'] = tpadata[str(min_id)][0]  # mu_x
+        # Same as A
+        m, n = B_block.shape
+        self.Bnnz_k = cvxpy.Parameter(B_block.nnz)
+        data = np.ones(self.Bnnz_k.size)
+        rows = B_block.row * n + B_block.col
+        cols = np.arange(self.Bnnz_k.size)
+        Indexer = csc_matrix((data, (rows, cols)), shape=(m * n, self.Bnnz_k.size))
+        self.Bk_ = cvxpy.reshape(Indexer @ self.Bnnz_k, (m, n), order="C")
+        self.Bnnz_k.value = B_block.data
+
+        # No need for sparse matrices for C as most values are parameters
+        self.Ck_ = cvxpy.Parameter(C_block.shape)
+        self.Ck_.value = C_block
+
+        # Dynamics constraint: x[k+1] = A*x[k] + B*u[k] + C
+        # This now includes: theta[k+1] = theta[k] + dt * v_theta[k]
+        constraints += [
+            cvxpy.vec(self.xk[:, 1:]) == 
+            self.Ak_ @ cvxpy.vec(self.xk[:, :-1]) + 
+            self.Bk_ @ cvxpy.vec(self.uk) + 
+            self.Ck_
+        ]
+        
+        # Initial condition
+        constraints += [self.xk[:, 0] == self.x0k]
+
+        # ========== STATE/INPUT CONSTRAINTS ==========
+
+        state_constraints, input_constraints, input_diff_constraints = self.model.get_model_constraints()
+
+        # ALL state constraints (including theta if your model provides them)
+        for i in range(self.config.NXK):  
+            constraints += [state_constraints[0, i] <= self.xk[i, :], 
+                        self.xk[i, :] <= state_constraints[1, i]]
+
+        # ALL input constraints (including v_theta if your model provides them)
+        for i in range(self.config.NU):  
+            constraints += [input_constraints[0, i] <= self.uk[i, :], 
+                        self.uk[i, :] <= input_constraints[1, i]]
+            constraints += [input_diff_constraints[0, i] <= cvxpy.diff(self.uk[i, :]),
+                        cvxpy.diff(self.uk[i, :]) <= input_diff_constraints[1, i]]
+
+        # Create optimization problem
+        self.MPC_prob = cvxpy.Problem(cvxpy.Minimize(objective), constraints)
+                
+    def mpc_prob_solve(self, x0):
+        """
+            Solve MPCC optimization problem
+            
+            x0: current state [x, y, v, phi, vx, vy, omega, theta] (NXK)
+            theta_predictions: predicted theta values for updating references
+        """  
+        self.x0k.value = x0
+        
+        # Initialize path prediction
+        path_predict = np.zeros((self.config.NXK, self.config.TK + 1))
+        path_predict[:, 0] = x0
+        
+        if not np.any(np.isnan(self.states_output)):
+            path_predict = self.states_output
         else:
-            env.params['tire_p_dy1'] = constant_friction #* 0.9  # mu_y
-            env.params['tire_p_dx1'] = constant_friction  # mu_x
+            v_theta_nominal = 2.0  # Just a reasonable starting guess
+            for t in range(1, self.config.TK + 1):
+                path_predict[7, t] = path_predict[7, t-1] + self.config.DTK * v_theta_nominal
+                path_predict[:7, t] = x0[:7]
+        
 
-   
+        for t in range(self.config.TK + 1):
+            theta_t = path_predict[7, t]
+            x_ref, y_ref = self.TrackRef.get_position(theta_t)
+            self.ref_positions_k.value[:, t] = [x_ref, y_ref]
+            
+            phi_ref = self.TrackRef.get_phi(theta_t)
+            # Pre-compute sin and cos
+            self.sin_phi_k.value[t] = np.sin(phi_ref)
+            self.cos_phi_k.value[t] = np.cos(phi_ref)
+            
+        # 2. Update dynamics linearization
+        input_predict = np.zeros((self.config.NU, self.config.TK + 1))
+        
+        A_batch, B_batch, C_batch = self.model.batch_get_model_matrix(
+            path_predict[:, :self.config.TK], 
+            input_predict[:, :self.config.TK]
+        )
+        
+        A_block = block_diag(tuple(A_batch))
+        B_block = block_diag(tuple(B_batch))
+        C_block = np.array(C_batch.flatten())
+        
+        self.Annz_k.value = A_block.data
+        self.Bnnz_k.value = B_block.data
+        self.Ck_.value = C_block
+        
+        # 3. Solve linearized problem
+        self.MPC_prob.solve(solver=cvxpy.OSQP, polish=True, adaptive_rho=True, rho=0.01, 
+                            eps_abs=0.001, eps_rel=0.001, verbose=False,
+                            warm_start=True)   
+        # Return final solution
+        if self.MPC_prob.status == cvxpy.OPTIMAL or self.MPC_prob.status == cvxpy.OPTIMAL_INACCURATE:
+            ou = self.uk.value
+            o_states = self.xk.value
+        else:
+            ou = np.zeros((self.config.NU, self.config.TK)) * np.NAN
+            o_states = np.zeros((self.config.NXK, self.config.TK + 1)) * np.NAN
+        
+        return ou, o_states
 
-        # print('Model used: %s' % model_to_use)
-        # Simulation step
-        step_reward = 0.0
-        for i in range(num_of_sim_steps):
-            obs, rew, done, info = env.step(np.array([[u[1], u[0]]]))
-            step_reward += rew
+    def MPCC_Control(self, x0):
+        """
+        Main MPCC control function
+        
+        x0: current vehicle state [x, y, v, phi, vx, vy, omega, theta] (NXK)
+        """
+        # Extract current theta from state (last element
+        
+        # Solve MPCC
+        input_o, states_output = self.mpc_prob_solve(x0)
+        
+        if not np.any(np.isnan(states_output)):
+            self.states_output = states_output
+            self.input_o = input_o
+        
+        # Extract control output (3 inputs: accel, steering, v_theta)
+        u = self.input_o[:, 0]
+        
+        # Generate reference path based on optimized theta trajectory
+        ref_path_x = np.zeros(self.config.TK + 1)
+        ref_path_y = np.zeros(self.config.TK + 1)
+        for t in range(self.config.TK + 1):
+            theta_t = states_output[self.theta_index, t] % self.track_length
+            ref_path_x[t], ref_path_y[t] = self.TrackRef.get_position(theta_t)
+        
+        # Predicted trajectory from optimization
+        pred_x = states_output[0, :]
+        pred_y = states_output[1, :]
 
-            # Rendering
-            last_render += 1
-            if last_render >= render_every:
-                last_render = 0
-                env.render(mode='human_fast')
-
-        laptime += step_reward
-
-        # Logging
-        log['time'].append(laptime)
-        log['x'].append(env.sim.agents[0].state[0])
-        log['y'].append(env.sim.agents[0].state[1])
-        log['vx'].append(env.sim.agents[0].state[3])
-        log['v_ref'].append(waypoints[:, 5][n_point])
-        log['tracking_error'].append(tracking_error)
-        log['lap_n'].append(obs['lap_counts'][0])
-
-
-
-        if obs['lap_counts'][0] == number_of_laps:  # or env.sim.agents[0].state[3] < 0.4 or tracking_error > 10.0:
-            done = 1
-
-    print('Sim elapsed time:', laptime, 'Real elapsed time:', time.time() - start)
-    with open('log01_eval', 'w') as f:
-        json.dump(log, f)
-
-
-if __name__ == '__main__':
-    main()
-
+        return u, ref_path_x, ref_path_y, pred_x, pred_y, pred_x, pred_y
+  
