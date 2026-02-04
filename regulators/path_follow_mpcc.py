@@ -290,19 +290,7 @@ class STMPCPlanner:
         print("Performance stored trajectories: \n", [self.Qfinal_speed[i][0] for i in range(0, self.it)])
 
     def calc_safe_set_components(self):
-        # Update zt and xLin is they have crossed the finish line. We want s \in [0, TrackLength]
-        # TODO after understanding what it is
-
-        # sort trajectories by time to construct safe set only from the best possible laps
         sortedLapTime = np.argsort(np.array(self.LapTimes))
-
-        # Select Points from historical data. These points will be used to construct the terminal cost function and constraint set
-        # TODO change for our problem
-        # SS_PointSelectedTot = np.empty((self.n, 0))
-        # Succ_SS_PointSelectedTot = np.empty((self.n, 0))
-        # Succ_uSS_PointSelectedTot = np.empty((self.d, 0))
-        # Qfun_SelectedTot = np.empty((0))
-
         self.numSS_it = 4
         self.numSS_Points = 12 * self.numSS_it
 

@@ -11,7 +11,7 @@ import casadi as ca
 def get_model_matrix_cf_batch_jit(state, control_input, TK, MASS, I_Z, LF, LR, TORQUE_SPLIT, BR, DR, BF, CF, DF, CM, CR, CR0, CR2, A, B):
     x, y, vx, yaw, vy, yaw_rate, steering_angle, theta = state
     Fxr, delta_v, vi = control_input
-    vx_safe = np.where(np.abs(vx) > 0.005, vx, 0.005)
+    vx_safe = np.where(np.abs(vx) > 0.5, vx, 0.5)
     A = np.zeros((TK, 8, 8))
     B = np.zeros((TK, 8, 3))
 
@@ -133,7 +133,7 @@ def get_f_batch_jit(state, control_input, MASS, I_Z, LF, LR, TORQUE_SPLIT, BR, D
     Fxr, delta_v, vi = control_input
 
     # tire model from: AMZ Driverless: The Full Autonomous Racing System, A simplified Pacejka tire model
-    vx_safe = np.where(np.abs(vx) > 0.005, vx, 0.005)
+    vx_safe = np.where(np.abs(vx) > 0.5, vx, 0.5)
 
     alfa_f = steering_angle - np.arctan((yaw_rate * LF + vy) / vx_safe)
     alfa_r = np.arctan((yaw_rate * LR - vy) / vx_safe)
@@ -239,7 +239,7 @@ class DynamicBicycleModel:
 
         # states x[k]
         x, y, vx, yaw, vy, yaw_rate, steering_angle, theta = state
-        vx_safe = np.where(np.abs(vx) > 0.005, vx, 0.005)
+        vx_safe = np.where(np.abs(vx) > 0.5, vx, 0.5)
         # tire model from: AMZ Driverless: The Full Autonomous Racing System, A simplified Pacejka tire model
         alfa_f = steering_angle - np.arctan((yaw_rate * self.config.LF + vy) / vx_safe)
         alfa_r = np.arctan((yaw_rate * self.config.LR - vy) / vx_safe)
@@ -316,7 +316,7 @@ class DynamicBicycleModel:
 
         x, y, vx, yaw, vy, yaw_rate, steering_angle, theta = state
         Fxr, delta_v, vi = control_input
-        vx_safe = np.where(np.abs(vx) > 0.005, vx, 0.005)
+        vx_safe = np.where(np.abs(vx) > 0.5, vx, 0.5)
         A = np.array([[np.zeros(self.config.TK), np.zeros(self.config.TK), np.cos(yaw), -vx * np.sin(yaw) - vy * np.cos(yaw), -np.sin(yaw),
                        np.zeros(self.config.TK), np.zeros(self.config.TK), np.zeros(self.config.TK)],
                       [np.zeros(self.config.TK), np.zeros(self.config.TK), np.sin(yaw), vx * np.cos(yaw) - vy * np.sin(yaw), np.cos(yaw),
@@ -537,7 +537,73 @@ class DynamicBicycleModel:
                 states[:, i - 1][3])) * self.config.DTK
             states[:, i][3] = states[:, i - 1][3] + (states[:, i - 1][5]) * self.config.DTK
         return states
-    
+    def forward_dynamics_casadi(self, state, control_input):
+        """
+        CasADi-compatible forward dynamics integration.
+        Returns x_{k+1} given x_k and u_k.
+        """
+        # 1. Unpack State
+        # state: [x, y, vx, yaw, vy, omega, steer, theta]
+        x_pos = state[0]
+        y_pos = state[1]
+        vx    = state[2]
+        yaw   = state[3]
+        vy    = state[4]
+        omega = state[5]
+        steer = state[6]
+        theta = state[7]
+
+        # 2. Unpack Input
+        # input: [Fxr, steer_rate, v_theta]
+        Fxr         = control_input[0]
+        steer_rate  = control_input[1]
+        v_theta     = control_input[2]
+
+        # 3. Parameters
+        m   = self.config.MASS
+        Iz  = self.config.I_Z
+        Lf  = self.config.LF
+        Lr  = self.config.LR
+        dt  = self.config.DTK
+
+        # 4. Tire Model (Pacejka)
+        # Prevent division by zero: if |vx| < 0.05, use 0.05
+        vx_safe = ca.if_else(ca.fabs(vx) > 0.05, vx, 0.05)
+
+        # Slip Angles
+        alpha_f = steer - ca.atan((omega * Lf + vy) / vx_safe)
+        alpha_r = ca.atan((omega * Lr - vy) / vx_safe)
+
+        # Lateral Forces
+        Ffy = self.config.DF * ca.sin(self.config.CF * ca.atan(self.config.BF * alpha_f))
+        Fry = self.config.DR * ca.sin(self.config.CR * ca.atan(self.config.BR * alpha_r))
+
+        # Longitudinal Forces (Simplified)
+        Fx = self.config.CM * Fxr - self.config.CR0 - self.config.CR2 * (vx_safe**2)
+        Frx = Fx * (1.0 - self.config.TORQUE_SPLIT)
+        Ffx = Fx * self.config.TORQUE_SPLIT
+
+        # 5. Derivatives
+        d_x     = vx * ca.cos(yaw) - vy * ca.sin(yaw)
+        d_y     = vx * ca.sin(yaw) + vy * ca.cos(yaw)
+        d_yaw   = omega
+        d_vx    = (1.0 / m) * (Frx - Ffy * ca.sin(steer) + Ffx * ca.cos(steer) + vy * omega * m)
+        d_vy    = (1.0 / m) * (Fry + Ffy * ca.cos(steer) + Ffx * ca.sin(steer) - vx * omega * m)
+        d_omega = (1.0 / Iz) * (Ffy * Lf * ca.cos(steer) - Fry * Lr)
+        d_steer = steer_rate
+        d_theta = v_theta
+
+        # 6. Euler Integration
+        next_x     = x_pos + d_x * dt
+        next_y     = y_pos + d_y * dt
+        next_vx    = vx    + d_vx * dt
+        next_yaw   = yaw   + d_yaw * dt
+        next_vy    = vy    + d_vy * dt
+        next_omega = omega + d_omega * dt
+        next_steer = steer + d_steer * dt
+        next_theta = theta + d_theta * dt
+
+        return ca.vertcat(next_x, next_y, next_vx, next_yaw, next_vy, next_omega, next_steer, next_theta)
 
 @dataclass
 class MPCConfigDYNTest:
