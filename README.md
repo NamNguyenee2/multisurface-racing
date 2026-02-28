@@ -11,4 +11,4 @@ This repository is using multi-body full scale car version of the [F1/10 gym](ht
 ### Comparison between PaIL-based MPCC and standard MPCC for autonomous racing car.
 
 
-![Result_pdf](PaIL_traj.pdf)
+![📄 View the full comparison results (PDF)](PaIL_traj.pdf)
